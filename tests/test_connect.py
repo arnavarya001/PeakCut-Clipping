@@ -187,6 +187,51 @@ with ctx.as_user(user.id):
     accounts._tt_token(accounts.get(ttacc["id"]))
     check("TikTok: an old sign-in is renewed, and the new refresh token kept", accounts.get(ttacc["id"])["refresh_token"], "tt-refresh-2")
 
+# ---- bulk posting
+(jd.parent / "job.json").write_text(json.dumps({
+    "id": "job-12345678", "user": user.id, "dir": str(jd.parent),
+    "clips": [
+        {"id": "clip01", "status": "done", "title": "Clip 1"},
+        {"id": "clip02", "status": "done", "title": "Clip 2"},
+        {"id": "clip03", "status": "rendering", "title": "Clip 3"},
+    ],
+    "status": "done", "creator": None, "created": time.time(), "options": {}, "source": {"type": "file"}
+}), encoding="utf-8")
+jobs.load_user(user.id)
+
+r_no_acc = b.post("/api/bulk/posts", json={"clips": [["job-12345678", "clip01"]], "accounts": []})
+check("bulk post requires at least one account", r_no_acc.status_code, 400)
+
+r_not_ready = b.post("/api/bulk/posts", json={"clips": [["job-12345678", "clip03"]], "accounts": [accs["instagram"]["id"]]})
+check("bulk post refuses non-ready clips", r_not_ready.status_code, 400)
+
+r_bulk = b.post("/api/bulk/posts", json={
+    "clips": [["job-12345678", "clip01"], ["job-12345678", "clip02"]],
+    "accounts": [accs["instagram"]["id"]],
+    "now": False
+})
+check("bulk post enqueues selected clips", (r_bulk.status_code, r_bulk.json()["queued"], r_bulk.json()["clips"]), (200, 2, 2))
+
+r_dup = b.post("/api/bulk/posts", json={
+    "clips": [["job-12345678", "clip01"], ["job-12345678", "clip02"]],
+    "accounts": [accs["instagram"]["id"]],
+    "now": False
+})
+check("bulk post prevents duplicate queuing", r_dup.status_code, 400)
+
+r_vid = b.post("/api/posts/bulk", json={
+    "videos": ["job-12345678"],
+    "accounts": [accs["tiktok"]["id"]],
+    "now": True
+})
+check("bulk post by video enqueues all done clips", (r_vid.status_code, r_vid.json()["queued"]), (200, 2))
+
+r_iso = a.post("/api/bulk/posts", json={
+    "clips": [["job-12345678", "clip01"]],
+    "accounts": [accs["instagram"]["id"]]
+})
+check("another user cannot bulk post clips that are not theirs", r_iso.status_code, 400)
+
 print("ALL PASSED" if not fails else f"{len(fails)} failed")
 import shutil; db.engine.dispose(); shutil.rmtree(os.environ["PEAKCUT_DATA"], ignore_errors=True)
 sys.exit(1 if fails else 0)

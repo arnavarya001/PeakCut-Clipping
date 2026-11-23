@@ -1068,6 +1068,55 @@ def bulk_render(body: dict = Body(...)):
     return {"ok": True, "count": count}
 
 
+@app.post("/api/bulk/posts")
+@app.post("/api/posts/bulk")
+def bulk_posts(body: dict = Body(...)):
+    _throttle("bulkpost:" + ctx.uid(), 30, 600)
+    acc_ids = [str(a) for a in body.get("accounts", []) if isinstance(a, (str, int))][:20]
+    if not acc_ids:
+        raise HTTPException(400, "Pick at least one account to post to.")
+    vids = [x for x in (body.get("videos") if isinstance(body.get("videos"), list) else [])[:100]
+            if isinstance(x, str) and re.fullmatch(r"[\w\-]{8,60}", x)]
+    clip_pairs = _pairs(body.get("clips"))
+    targets = []
+    for vid in vids:
+        j = jobs.get(vid)
+        if j:
+            for c in j.get("clips", []):
+                if c.get("status") == "done":
+                    targets.append((vid, c["id"]))
+    for jid, cid in clip_pairs:
+        if (jid, cid) not in targets:
+            j = jobs.get(jid)
+            if j and any(c["id"] == cid and c.get("status") == "done" for c in j.get("clips", [])):
+                targets.append((jid, cid))
+
+    if not targets:
+        raise HTTPException(400, "None of those clips are ready to post yet.")
+
+    now = bool(body.get("now"))
+    total_queued = 0
+    clips_queued = 0
+    for jid, cid in targets:
+        j = jobs.get(jid)
+        if not j:
+            continue
+        c = next((clip for clip in j.get("clips", []) if clip["id"] == cid and clip.get("status") == "done"), None)
+        if not c:
+            continue
+        made = posting.enqueue(j, c, acc_ids, now=now)
+        if made:
+            total_queued += len(made)
+            clips_queued += 1
+
+    if total_queued == 0:
+        raise HTTPException(400, "Nothing was queued. Those clips have already been posted or queued for the selected account(s).")
+
+    ctx.bump()
+    return {"ok": True, "queued": total_queued, "clips": clips_queued, "total_targets": len(targets)}
+
+
+
 @app.get("/api/clips.zip")
 def clips_zip(ids: str = ""):
     """Many clips as one download. `ids` is video.clip pairs separated by commas."""

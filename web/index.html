@@ -1288,7 +1288,7 @@ function drawShell() {  const nav = (v, icon, label, extra = "") => `<button cla
     if (hasJobs) {
       const allOn = list.length > 0 && list.every(j => ["queued", "running", "live"].includes(j.status) || sel().has("j:" + j.id));
       act = `<button class="btn sm" data-act="selall">${ic("check")}${allOn ? "Deselect all" : "Select all"}</button>`
-          + (sel().size ? ` <button class="btn sm primary" data-act="seledit">${ic("sliders")}Edit selected</button>` : "");
+          + (sel().size ? ` <button class="btn sm primary" data-act="seledit">${ic("sliders")}Edit selected</button> <button class="btn sm" data-act="selpost">${ic("send")}Post selected</button>` : "");
     }
   }
 
@@ -1777,6 +1777,7 @@ function drawSelBar() {
   put(bar, `<b>${n} selected</b>
     <button class="btn sm" data-act="selall">Select all</button>
     <button class="btn sm primary" data-act="seledit">${ic("sliders")}Edit selected</button>
+    <button class="btn sm" data-act="selpost" ${dl ? "" : "disabled"}>${ic("send")}Post selected</button>
     <button class="btn sm" data-act="seldl" ${dl ? "" : "disabled"}>${ic("down")}Download${dl ? ` ${dl} clip${dl === 1 ? "" : "s"}` : ""}</button>
     <button class="btn sm danger" data-act="seldel">${ic("trash")}Delete</button>
     <button class="btn sm" data-act="selclear">Cancel</button>`);
@@ -1832,6 +1833,87 @@ function openBulkEdit(vids, clips) {
     try {
       const res = await send("/api/bulk/render", {videos: vids, clips: clips, changes});
       toast(`Re-making ${res.count} clip${res.count === 1 ? "" : "s"}…`, "ok");
+      sel().clear();
+      await tick();
+      render();
+    } catch (e) {
+      toast(e.message, "bad");
+    }
+  };
+  dlg.returnValue = "no";
+  dlg.showModal();
+}
+function openBulkPost(vids, clips) {
+  const dlg = $("#formdlg");
+  const targets = [];
+  const seen = new Set();
+  (vids || []).forEach(jid => {
+    (jobOf(jid)?.clips || []).forEach(c => {
+      if (c.status === "done") {
+        const key = jid + "." + c.id;
+        if (!seen.has(key)) { seen.add(key); targets.push({jid, cid: c.id, clip: c}); }
+      }
+    });
+  });
+  (clips || []).forEach(([jid, cid]) => {
+    const c = jobOf(jid)?.clips.find(x => x.id === cid);
+    if (c && c.status === "done") {
+      const key = jid + "." + cid;
+      if (!seen.has(key)) { seen.add(key); targets.push({jid, cid, clip: c}); }
+    }
+  });
+
+  if (!targets.length) return toast("None of those clips are ready to post yet.", "bad");
+  if (!S.accounts || !S.accounts.length) return toast("No accounts connected yet. Connect one in Settings.", "bad");
+
+  const countStr = `${targets.length} clip${targets.length === 1 ? "" : "s"} selected`;
+  dlg.innerHTML = `<form method="dialog" class="dlg">
+    <h2>Post selected clips</h2>
+    <p class="help"><b>${esc(countStr)}</b> to publish across connected accounts.</p>
+    <div class="fields" style="display:flex;flex-direction:column;gap:14px;margin:14px 0">
+      <div>
+        <label class="f" style="font-weight:600;margin-bottom:6px">Select connected accounts</label>
+        <div style="display:flex;flex-direction:column;gap:6px">
+          ${S.accounts.map(a => `<label class="ck" style="display:flex;align-items:center;gap:8px">
+            <input type="checkbox" name="bp_acc" value="${esc(a.id)}" checked>
+            <span><b>${esc(a.label || a.platform)}</b> — ${esc(a.name)}</span>
+          </label>`).join("")}
+        </div>
+      </div>
+      <div>
+        <label class="f" style="font-weight:600;margin-bottom:6px">Posting mode</label>
+        <div style="display:flex;flex-direction:column;gap:8px">
+          <label class="ck" style="display:flex;align-items:flex-start;gap:8px;cursor:pointer">
+            <input type="radio" name="bp_mode" value="queue" checked style="margin-top:3px">
+            <div>
+              <b>Add all to Queue</b>
+              <div class="sub" style="font-size:12px;color:var(--sub)">Queued with spacing intervals to avoid platform spam flags.</div>
+            </div>
+          </label>
+          <label class="ck" style="display:flex;align-items:flex-start;gap:8px;cursor:pointer">
+            <input type="radio" name="bp_mode" value="now" style="margin-top:3px">
+            <div>
+              <b>Post all now</b>
+              <div class="sub" style="font-size:12px;color:var(--sub)">Instant upload straight away.</div>
+            </div>
+          </label>
+        </div>
+      </div>
+    </div>
+    <div class="dlg-foot">
+      <button class="btn" value="no" formnovalidate>Cancel</button>
+      <button class="btn primary" value="yes">${ic("send")}Upload All Clips (1-Click)</button>
+    </div>
+  </form>`;
+
+  dlg.onclose = async () => {
+    if (dlg.returnValue !== "yes") return;
+    const accs = $$("#formdlg [name='bp_acc']:checked").map(i => i.value);
+    if (!accs.length) return toast("Tick at least one account first.", "bad");
+    const now = $("#formdlg [name='bp_mode']:checked")?.value === "now";
+    try {
+      const res = await send("/api/bulk/posts", {videos: vids, clips: clips, accounts: accs, now});
+      toast(now ? `Posting ${res.clips || targets.length} clip${(res.clips || targets.length) === 1 ? "" : "s"} now…` : `Added ${res.queued} post${res.queued === 1 ? "" : "s"} to the queue`, "ok");
       sel().clear();
       await tick();
       render();
@@ -2416,6 +2498,10 @@ document.addEventListener("click", async e => {
     if (a === "seledit") {
       const {jobsSel, clipsSel} = selParts();
       return openBulkEdit(jobsSel, clipsSel);
+    }
+    if (a === "selpost") {
+      const {jobsSel, clipsSel} = selParts();
+      return openBulkPost(jobsSel, clipsSel);
     }
     if (a === "seldl") return zipDownload(selClips());
     if (a === "selclear") { sel().clear(); return render(); }
